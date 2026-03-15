@@ -1,0 +1,71 @@
+name: YouTube Upload Notifier
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # every 15 minutes
+  workflow_dispatch:         # allow manual trigger
+
+jobs:
+  check-and-notify:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write  # needed to update repo variable
+
+    steps:
+      - name: Check for new video and notify Discord
+        env:
+          CHANNEL_ID: UC4_toGdH1h8QMd5w9eCnWdw
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          LAST_VIDEO_ID: ${{ vars.LAST_VIDEO_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Fetch RSS feed
+          RSS=$(curl -s "https://www.youtube.com/feeds/videos.xml?channel_id=$CHANNEL_ID")
+
+          # Extract latest video ID and metadata
+          LATEST_ID=$(echo "$RSS" | grep -o '<yt:videoId>[^<]*</yt:videoId>' | head -1 | sed 's/<[^>]*>//g')
+          TITLE=$(echo "$RSS" | grep -o '<title>[^<]*</title>' | sed -n '2p' | sed 's/<[^>]*>//g')
+          PUBLISHED=$(echo "$RSS" | grep -o '<published>[^<]*</published>' | head -1 | sed 's/<[^>]*>//g')
+          THUMB="https://img.youtube.com/vi/$LATEST_ID/maxresdefault.jpg"
+          URL="https://www.youtube.com/watch?v=$LATEST_ID"
+
+          echo "Latest video ID: $LATEST_ID"
+          echo "Last known ID:   $LAST_VIDEO_ID"
+
+          if [ "$LATEST_ID" = "$LAST_VIDEO_ID" ]; then
+            echo "No new video. Done."
+            exit 0
+          fi
+
+          echo "New video detected! Posting to Discord..."
+
+          # Post embed to Discord
+          curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"embeds\": [{
+                \"title\": $(echo "$TITLE" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()))'),
+                \"url\": \"$URL\",
+                \"color\": 16711680,
+                \"image\": { \"url\": \"$THUMB\" },
+                \"footer\": { \"text\": \"New video just dropped 🎬\" },
+                \"timestamp\": \"$PUBLISHED\"
+              }]
+            }"
+
+          # Update the stored last video ID via GitHub API
+          curl -s -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GH_REPO/actions/variables/LAST_VIDEO_ID" \
+            -d "{\"name\":\"LAST_VIDEO_ID\",\"value\":\"$LATEST_ID\"}"
+
+          # Create variable if it didn't exist yet (PATCH returns 404 on first run)
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GH_REPO/actions/variables" \
+            -d "{\"name\":\"LAST_VIDEO_ID\",\"value\":\"$LATEST_ID\"}" 2>/dev/null || true
+
+          echo "Done!"
