@@ -19,13 +19,28 @@ jobs:
           CHANNEL_ID: UC4_toGdH1h8QMd5w9eCnWdw
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          # Fetch RSS feed
-          RSS=$(curl -s "https://www.youtube.com/feeds/videos.xml?channel_id=$CHANNEL_ID")
+          set -euo pipefail
+
+          # Fetch RSS feed (fail the job on any HTTP error instead of silently parsing garbage)
+          RSS=$(curl -sS --fail --retry 3 --retry-delay 5 \
+            "https://www.youtube.com/feeds/videos.xml?channel_id=$CHANNEL_ID")
 
           # Extract latest video ID and metadata
           LATEST_ID=$(echo "$RSS" | grep -o '<yt:videoId>[^<]*</yt:videoId>' | head -1 | sed 's/<[^>]*>//g')
           TITLE=$(echo "$RSS" | grep -o '<title>[^<]*</title>' | sed -n '2p' | sed 's/<[^>]*>//g')
           PUBLISHED=$(echo "$RSS" | grep -o '<published>[^<]*</published>' | head -1 | sed 's/<[^>]*>//g')
+
+          # Sanity-check the parsed ID. YouTube video IDs are exactly 11 chars of [A-Za-z0-9_-].
+          # If the RSS feed returned an error page, throttled HTML, or partial content, bail out
+          # WITHOUT notifying or overwriting last_video_id.txt — otherwise we'd clobber the stored
+          # ID with an empty string and re-notify the previous video on the next successful run.
+          if ! echo "$LATEST_ID" | grep -Eq '^[A-Za-z0-9_-]{11}$'; then
+            echo "ERROR: failed to parse a valid video ID from RSS feed (got: '$LATEST_ID')."
+            echo "Refusing to notify or update state. First 500 chars of RSS response:"
+            echo "$RSS" | head -c 500
+            exit 1
+          fi
+
           THUMB="https://img.youtube.com/vi/$LATEST_ID/maxresdefault.jpg"
           URL="https://www.youtube.com/watch?v=$LATEST_ID"
 
